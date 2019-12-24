@@ -10,17 +10,17 @@ import certifi
 
 class GraphQLClient(object):
     def __init__(self, endpoint, certcheck = True):
-        self.endpoint = endpoint
-        self.token = None
-        self.headername = None
-        self.certcheck = certcheck
+        self._endpoint = endpoint
+        self._token = None
+        self._headername = None
+        self._certcheck = certcheck
 
     def execute(self, query, variables=None):
         return self._send(query, variables)
 
     def inject_token(self, token, headername='Authorization'):
-        self.token = token
-        self.headername = headername
+        self._token = token
+        self._headername = headername
 
     def _send(self, query, variables):
         data = {'query': query,
@@ -28,13 +28,13 @@ class GraphQLClient(object):
         headers = {'Accept': 'application/json',
                    'Content-Type': 'application/json'}
 
-        if self.token is not None:
-            headers[self.headername] = '{}'.format(self.token)
+        if self._token is not None:
+            headers[self._headername] = '{}'.format(self._token)
 
-        req = urllib.request.Request(self.endpoint, json.dumps(data).encode('utf-8'), headers)
+        req = urllib.request.Request(self._endpoint, json.dumps(data).encode('utf-8'), headers)
 
         try:
-            if self.certcheck:
+            if self._certcheck:
                 context = ssl.create_default_context(cafile=certifi.where())
             else:
                 context = ssl._create_unverified_context()
@@ -54,27 +54,28 @@ class GraphQLSubscriptionClient(object):
     """
 
     def __init__(self, url, certcheck = True, reconnect = True):
-        self.url = url
-        self.certcheck = certcheck
+        self._url = url
+        self._certcheck = certcheck
         self._sub_thread = None
+        self._reconnect = reconnect
         self._subscriptions = {} #id/handler mapping
         self._init_connection()
 
     def _init_connection(self):
         try:
-            if self.certcheck:
-                self._conn = websocket.create_connection(self.url)
+            if self._certcheck:
+                self._conn = websocket.create_connection(self._url)
             else:
-                self._conn = websocket.create_connection(self.url,
+                self._conn = websocket.create_connection(self._url,
                                                     sslopt={"cert_reqs": ssl.CERT_NONE})
         except:
-            print("Unable to create websocket connection on {}".format(self.url))
+            print("Unable to create websocket connection on {}".format(self._url))
             self._conn = None
             return False
 
         ack = self._conn_init()
         if ack['type'] == 'connection_error':
-            print("Unable to initiate GraphQL connection on websocket for {}".format(self.url))
+            print("Unable to initiate GraphQL connection on websocket for {}".format(self._url))
             self._conn.close()
             self._conn = None
             return False
@@ -112,7 +113,7 @@ class GraphQLSubscriptionClient(object):
         self._conn.send(json.dumps(payload))
 
     def _rebuild_connection(self):
-        print("reestablishing websocket connection to {}".format(self.url))
+        print("reestablishing websocket connection to {}".format(self._url))
         if self._init_connection():
             # reestablish subscriptions
             new_subscription = {}
@@ -141,8 +142,15 @@ class GraphQLSubscriptionClient(object):
             try:
                 r = json.loads(self._conn.recv())
             except websocket._exceptions.WebSocketConnectionClosedException:
-                self._rebuild_connection()
-                continue
+                if self._reconnect:
+                    self._rebuild_connection()
+                    continue
+                else:
+                    print("Remote websocket closed, disable the client")
+                    self._subscriptions = {}
+                    self._conn = None
+                    self._sub_thread = None
+                    break
             #print(r)
             if r['type'] != 'ka' and r['id'] in self._subscriptions:
                 if r['type'] == 'error':
