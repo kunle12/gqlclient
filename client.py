@@ -68,13 +68,13 @@ class GraphQLSubscriptionClient(object):
             else:
                 self._conn = websocket.create_connection(self._url,
                                                     sslopt={"cert_reqs": ssl.CERT_NONE})
-        except:
-            print("Unable to create websocket connection on {}".format(self._url))
+        except Exception as e:
+            print("Unable to create websocket connection on {}, error {}".format(self._url, e))
             self._conn = None
             return False
 
         ack = self._conn_init()
-        if ack['type'] == 'connection_error':
+        if not ack or ack['type'] == 'connection_error':
             print("Unable to initiate GraphQL connection on websocket for {}".format(self._url))
             self._conn.close()
             self._conn = None
@@ -86,15 +86,23 @@ class GraphQLSubscriptionClient(object):
             'type': 'connection_init',
             'payload': {'headers': headers}
         }
-        self._conn.send(json.dumps(payload))
-        return json.loads(self._conn.recv())
+        retdata = None
+        try:
+            self._conn.send(json.dumps(payload))
+            retdata = self._conn.recv()
+        except:
+            return None
+        return json.loads(retdata)
 
     def _conn_term(self, headers=None):
         payload = {
             'type': 'connection_terminate',
             'payload': {'headers': headers}
         }
-        self._conn.send(json.dumps(payload))
+        try:
+            self._conn.send(json.dumps(payload))
+        except:
+            pass
 
     def _start(self, payload):
         if not self._conn:
@@ -105,12 +113,19 @@ class GraphQLSubscriptionClient(object):
 
         _id = gen_id()
         frame = {'id': _id, 'type': 'start', 'payload': payload}
-        self._conn.send(json.dumps(frame))
+        try:
+            self._conn.send(json.dumps(frame))
+        except:
+            print("Unable to start GraphQL subscription connection")
+            return None
         return _id
 
     def _stop(self, _id):
         payload = {'id': _id, 'type': 'stop'}
-        self._conn.send(json.dumps(payload))
+        try:
+            self._conn.send(json.dumps(payload))
+        except:
+            pass
 
     def _rebuild_connection(self):
         print("reestablishing websocket connection to {}".format(self._url))
@@ -118,7 +133,10 @@ class GraphQLSubscriptionClient(object):
             # reestablish subscriptions
             new_subscription = {}
             for cb,payload in self._subscriptions.values():
-                new_subscription[self._start(payload)] = (cb, payload)
+                _id = self._start(payload)
+                if not _id:
+                    continue
+                new_subscription[_id] = (cb, payload)
             self._subscriptions = new_subscription
 
     def _on_message(self, message):
@@ -140,8 +158,9 @@ class GraphQLSubscriptionClient(object):
                 self._rebuild_connection()
                 continue
             try:
-                r = json.loads(self._conn.recv())
-            except websocket._exceptions.WebSocketConnectionClosedException:
+                retdata = self._conn.recv()
+                r = json.loads(retdata)
+            except:
                 if self._reconnect:
                     self._rebuild_connection()
                     continue
@@ -171,6 +190,8 @@ class GraphQLSubscriptionClient(object):
 
         payload = {'headers': headers, 'query': query, 'variables': variables}
         _id = self._start(payload)
+        if not _id:
+            return _id
         _lock = threading.Lock()
         with _lock:
             self._subscriptions[_id] = (self._on_message if not callback else callback,payload)
@@ -201,6 +222,9 @@ class GraphQLSubscriptionClient(object):
         if self._sub_thread:
             self._sub_thread.join()
             self._sub_thread = None
-        self._conn_term()
-        self._conn.close()
+        try: # connection may be already reset by peer.
+            self._conn_term()
+            self._conn.close()
+        except:
+            pass
         self._conn = None
